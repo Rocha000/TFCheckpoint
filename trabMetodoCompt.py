@@ -1,73 +1,53 @@
-from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input, decode_predictions
-import numpy as np
 import cv2
 from skimage.metrics import structural_similarity as ssim
-from skimage.measure import shannon_entropy
 import matplotlib.pyplot as plt
-from math import log10, sqrt
+import numpy as np
+from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input, decode_predictions
 
-# Carregar modelo ResNet50 pré-treinado no ImageNet
+# Carregar o modelo ResNet50 pré-treinado no ImageNet
 MODEL = ResNet50(weights='imagenet')
 
-# Função para carregar imagem
+# Função para garantir que todas as imagens distorcidas sejam redimensionadas para 224x224
+def resize_to_original(img, target_size=(224, 224)):
+    return cv2.resize(img, target_size)
+
+# Função para carregar imagem e converter de BGR para RGB
 def open_img(path):
-    return cv2.imread(path)
+    img = cv2.imread(path)
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # Converter de BGR para RGB
 
-# Função para classificar imagem e retornar classe e confiança
-def classify(img):
-    try:
-        x = cv2.resize(img, (224,224))
-        x = x[:,:,::-1].astype(np.float32)
-        x = np.expand_dims(x, axis=0)
-        x = preprocess_input(x)
-        preds = MODEL.predict(x)
-        classes = decode_predictions(preds)[0]
-        for c in classes:
-            print(f"\t{c[1]} ({c[0]}): {c[2]*100:.2f}%")
-        return classes[0][1], classes[0][2], preds  # Retorna classe, confiança e as probabilidades
-    except Exception as e:
-        print("Falha na classificação.")
-        return None, None, None
-
-# Função para calcular SSIM
+# Função para calcular SSIM com redimensionamento
 def calculate_ssim(img1, img2):
-    return ssim(img1, img2, channel_axis=2) * 100
+    img1_resized = resize_to_original(img1)
+    img2_resized = resize_to_original(img2)
+    return ssim(img1_resized, img2_resized, channel_axis=2) * 100
 
 # Função para calcular PSNR
 def calculate_psnr(img1, img2):
-    mse = np.mean((img1 - img2) ** 2)
+    img1_resized = resize_to_original(img1)
+    img2_resized = resize_to_original(img2)
+    mse = np.mean((img1_resized - img2_resized) ** 2)
     if mse == 0:
         return 100  # PSNR máximo se não houver diferença
     PIXEL_MAX = 255.0
-    return 20 * log10(PIXEL_MAX / sqrt(mse))
+    return 20 * np.log10(PIXEL_MAX / np.sqrt(mse))
 
-# Função para calcular Entropia
+# Função para calcular entropia
 def calculate_entropy(img):
     gray_img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    return shannon_entropy(gray_img)
+    hist, _ = np.histogram(gray_img, bins=256, range=(0, 256))
+    hist_prob = hist / hist.sum()
+    return -np.sum(hist_prob * np.log2(hist_prob + 1e-7))
 
-# Função para calcular Diferença nas Probabilidades
+# Função para calcular a diferença nas probabilidades de classificação
 def calculate_probability_difference(original_probs, distorted_probs):
     return np.sum(np.abs(original_probs - distorted_probs))
 
-# Funções de distorções
-
-# Compressão JPEG
+# Função para compressão JPEG e conversão para RGB
 def jpeg(img, quality):
     _, x = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
-    return cv2.imdecode(x, cv2.IMREAD_COLOR)
-
-# Redimensionar imagem
-def resize(img, w, h):
-    orig_h, orig_w = img.shape[:2]
-    x = cv2.resize(img, (w, h))
-    return cv2.resize(x, (orig_w, orig_h))
-
-# Detecção de bordas (Canny)
-def canny(img):
-    x = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    x = cv2.Canny(x, 100, 200)
-    return cv2.cvtColor(x, cv2.COLOR_GRAY2RGB)
+    jpeg_image = cv2.imdecode(x, cv2.IMREAD_COLOR)
+    return cv2.cvtColor(jpeg_image, cv2.COLOR_BGR2RGB)  # Converter para RGB após compressão
 
 # Função para aplicar ruído gaussiano
 def add_gaussian_noise(img, mean=0, var=0.1):
@@ -82,45 +62,68 @@ def convert_to_grayscale(img):
     grayscale_img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     return cv2.cvtColor(grayscale_img, cv2.COLOR_GRAY2RGB)
 
+# Função para detecção de bordas (Canny)
+def canny(img):
+    x = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    x = cv2.Canny(x, 100, 200)
+    return cv2.cvtColor(x, cv2.COLOR_GRAY2RGB)
+
 # Função para recortar imagem
 def crop_image(img):
     cropped_img = img[50:200, 50:200]
-    return cv2.resize(cropped_img, (224, 224))
+    return resize_to_original(cropped_img)
 
-# Função para exibir cada distorção separadamente com as métricas corretas
+# Função para classificar imagem e retornar classe e confiança
+def classify(img):
+    try:
+        x = cv2.resize(img, (224, 224))
+        x = x[:, :, ::-1].astype(np.float32)
+        x = np.expand_dims(x, axis=0)
+        x = preprocess_input(x)
+        preds = MODEL.predict(x)
+        classes = decode_predictions(preds, top=5)[0]
+        for c in classes:
+            print(f"\t{c[1]} ({c[0]}): {c[2]*100:.2f}%")
+        return classes[0][1], classes[0][2], preds  # Retorna classe, confiança e probabilidades
+    except Exception as e:
+        print(f"Erro na classificação: {e}")
+        return None, None, None
+
+# Exibir distorções e calcular métricas
 def display_individual_distortions(img, img_path):
     print("Imagem Original:")
     original_img = open_img(img_path)
     original_class, original_conf, original_probs = classify(original_img)
 
+    # Distorções aplicadas e garantido que as imagens estejam em RGB
     distorcoes = {
         "Compressão JPEG 70%": jpeg(original_img, 70),
-        "Redimensionamento para 64x64": resize(original_img, 64, 64),
+        "Redimensionamento para 64x64": resize_to_original(original_img, (64, 64)),
         "Ruído Gaussiano": add_gaussian_noise(original_img),
         "Conversão para Escala de Cinza": convert_to_grayscale(original_img),
         "Detecção de Bordas (Canny)": canny(original_img),
         "Corte (Cropping)": crop_image(original_img)
     }
 
-    # Definir as métricas a serem aplicadas para cada distorção
     metrics_for_each = {
         "Compressão JPEG 70%": ['SSIM', 'PSNR', 'Entropia', 'Diferença nas Probabilidades'],
         "Redimensionamento para 64x64": ['SSIM', 'PSNR', 'Diferença nas Probabilidades'],
         "Ruído Gaussiano": ['SSIM', 'PSNR', 'Entropia', 'Diferença nas Probabilidades'],
         "Conversão para Escala de Cinza": ['Entropia', 'Diferença nas Probabilidades'],
-        "Detecção de Bordas (Canny)": ['Entropia', 'Diferença nas Probabilidades'],
-        "Corte (Cropping)": ['SSIM', 'PSNR', 'Diferença nas Probabilidades']
+        "Detecção de Bordas (Canny)": ['SSIM', 'PSNR', 'Entropia', 'Diferença nas Probabilidades'],
+        "Corte (Cropping)": ['SSIM', 'PSNR', 'Entropia', 'Diferença nas Probabilidades']
     }
 
     for nome_distorcao, img_distorcida in distorcoes.items():
+        img_distorcida_resized = resize_to_original(img_distorcida)  # Garantir tamanho 224x224
         plt.figure(figsize=(6, 6))
-        plt.imshow(img_distorcida)
-        
-        # Aplicar métricas conforme definido em 'metrics_for_each'
-        ssim_score = calculate_ssim(original_img, img_distorcida) if 'SSIM' in metrics_for_each[nome_distorcao] else "N/A"
-        psnr_value = calculate_psnr(original_img, img_distorcida) if 'PSNR' in metrics_for_each[nome_distorcao] else "N/A"
-        entropy_value = calculate_entropy(img_distorcida) if 'Entropia' in metrics_for_each[nome_distorcao] else "N/A"
-        class_name, confidence, distorted_probs = classify(img_distorcida)
+        plt.imshow(img_distorcida_resized)
+
+        # Calcular as métricas
+        ssim_score = calculate_ssim(original_img, img_distorcida_resized) if 'SSIM' in metrics_for_each[nome_distorcao] else "N/A"
+        psnr_value = calculate_psnr(original_img, img_distorcida_resized) if 'PSNR' in metrics_for_each[nome_distorcao] else "N/A"
+        entropy_value = calculate_entropy(img_distorcida_resized) if 'Entropia' in metrics_for_each[nome_distorcao] else "N/A"
+        class_name, confidence, distorted_probs = classify(img_distorcida_resized)
         prob_diff = calculate_probability_difference(original_probs, distorted_probs) if distorted_probs is not None and 'Diferença nas Probabilidades' in metrics_for_each[nome_distorcao] else "N/A"
 
         # Verificar se os valores são números e aplicar formatação, caso contrário, exibir 'N/A'
@@ -129,14 +132,14 @@ def display_individual_distortions(img, img_path):
         entropy_str = f"{entropy_value:.2f}" if isinstance(entropy_value, (int, float)) else entropy_value
         prob_diff_str = f"{prob_diff:.4f}" if isinstance(prob_diff, (int, float)) else prob_diff
 
-        # Exibir imagem distorcida com as métricas
+        # Exibir imagem com as métricas
         plt.title(f"{nome_distorcao}\nSSIM: {ssim_str} | PSNR: {psnr_str}\n"
                   f"Classe: {class_name}, Confiança: {confidence:.2f}\n"
                   f"Entropia: {entropy_str} | Diferença nas Prob: {prob_diff_str}")
         plt.axis('off')
         plt.show()
 
-# Caminho atualizado para a imagem original
+# Caminho para a imagem original
 img_path = 'imagenette2/train/n02102040/n02102040_7886.JPEG'
 
 # Exibir as distorções e suas métricas
