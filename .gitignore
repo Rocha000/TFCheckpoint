@@ -1,3 +1,5 @@
 imagenette2/
-teste1.py/
-classifier.py/
+distorted-images/
+imagensdistorcidas-all-data.csv
+*.JPEG
+funcoes.cpython-310.pyc
